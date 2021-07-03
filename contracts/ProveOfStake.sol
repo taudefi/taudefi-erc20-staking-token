@@ -5,14 +5,21 @@ import "./IERC20Staking.sol";
 import "./IStakeholder.sol";
 
 contract ProveOfStake is TConst {
-    uint8 private _stakerThreshold = 9;
+    uint8 private _stakerThreshold = 6;
     address[] private stakeholders;
     address private _erc20StakingAddr;
     
-    uint256 public _rate;
-    mapping (address => uint256) public _h_balances;
-    uint256 public _h_totalSupply;
-    uint256 public _deposited_total;
+    uint256 public _totalSupply;
+    mapping(address => uint256) public _DP_balances;
+    mapping(address => uint256) public _LP_balances;
+    uint256 public _totalPointSupply;
+    
+    //uint256 public _rate;
+    //mapping (address => uint256) public _h_balances;
+    //uint256 public _h_totalSupply;
+    //uint256 public _deposited_total;
+    
+    
     mapping (address => bool) public isStakeholder;
     
     //uint64 public totalStakeholder;
@@ -40,7 +47,7 @@ contract ProveOfStake is TConst {
     
     constructor(address erc20){
         _erc20StakingAddr = erc20;
-        _rate = 1 * BONE;
+        //_rate = 1 * BONE;
         
         Stakeholder _stakeholder21 = new Stakeholder(true, 100, "TURA Staking 21 days");
         stakeholders.push(address(_stakeholder21));
@@ -53,38 +60,65 @@ contract ProveOfStake is TConst {
         isStakeholder[address(_stakeholder7)] = true;
     }
     
+    function balanceOf(address pool)
+        public view returns (uint256){
+        return IERC20Staking(_erc20StakingAddr).balanceOf(pool);
+    }
+    
+    function pointRate()
+        public view returns (uint256){
+        if(_totalSupply == 0 || _totalPointSupply == 0){
+            return 1 * BONE;
+        }
+        return (_totalSupply * BONE)/_totalPointSupply;
+    }
+    
+    function pointBalanceOf(address account)
+        public view returns (uint256){
+        return _LP_balances[account];
+    }
+    
+    //todo
     function distributeRewards(uint256 reward) external returns (bool){
-        _deposited_total = _deposited_total + reward;
-        _rate = (_deposited_total * BONE) / _h_totalSupply;
         uint256 totalDistributed = 0;
         for (uint i=0; i < stakeholders.length - 1; i++){
             if(IStakeholder(stakeholders[i]).active()){
-                totalDistributed = totalDistributed + _claimReward(stakeholders[i]);
+                //totalDistributed = totalDistributed + _claimReward(stakeholders[i]);
             }
         }
         
         uint256 _burn = reward - totalDistributed;
         if(_burn > 0){
             IERC20Staking(_erc20StakingAddr).burn(_burn);
-            _deposited_total = _deposited_total - _burn;
-            _rate = (_deposited_total * BONE) / _h_totalSupply;
         }
         return true;
     }
     
     function stake(uint256 amount) external 
-        stakeholderExists(msg.sender) returns (bool){
-        _deposited_total = _deposited_total + amount;
-        _addHiddenToken(msg.sender, amount);
+        //todo: stakeholderExists(msg.sender) 
+        returns (bool){
+        uint256 _mintedPoint = (amount * BONE)/pointRate();
+        _LP_balances[msg.sender] = _LP_balances[msg.sender] + _mintedPoint;
+        _DP_balances[msg.sender] = _DP_balances[msg.sender] + amount;
+        
+        _totalPointSupply = _totalPointSupply + _mintedPoint;
+        _totalSupply = _totalSupply + amount;
+        
         return true;
     }
     
     function unstake(uint256 amount) external 
-        stakeholderExists(msg.sender) returns (bool){
-        //todo:check if reward>0 then claimReward
-        IERC20Staking(_erc20StakingAddr).claimReward();
-        _deposited_total = _deposited_total - amount;
-        _removeHiddenToken(msg.sender, amount);
+        //todo: stakeholderExists(msg.sender) 
+        returns (bool){
+        claimReward(msg.sender);
+        uint256 _burntPoint = (pointBalanceOf(msg.sender) * amount) / balanceOf(msg.sender);
+        _LP_balances[msg.sender] = _LP_balances[msg.sender] - _burntPoint;
+        _DP_balances[msg.sender] = _DP_balances[msg.sender] - amount;
+        _totalSupply = _totalSupply - amount;
+        _totalPointSupply = _totalPointSupply - _burntPoint;
+        
+        //bool xfer = ERC20(erc20).transfer(account, _burntPoint);
+        //require(xfer, "ERR_ERC20_FALSE");
         return true;
     }
     
@@ -122,44 +156,43 @@ contract ProveOfStake is TConst {
         return stakeholders;
     }
     
-    function _claimReward(address account) private returns (uint256){
-        uint256 poolReward = poolRewardOf(account);
-        if(poolReward > 0){
-            //uint256 poolReward = ((_h_balances[account].mul(_rate)).div(_rate_decimal)).sub(originBalanceOf(account));
-            IERC20Staking(_erc20StakingAddr).transfer(account, poolReward);
-            //_mint(account, userReward);
-        }
-        return poolReward;
+    function _addReward(uint256 amount) 
+        private returns (bool){
+        _totalSupply = _totalSupply + amount;    
     }
     
-    //function originBalanceOf(address account) public view returns (uint256) {
-    //    return super.balanceOf(account);
-    //}
+    function claimStakingReward() public returns (uint256){
+        if(IERC20Staking(_erc20StakingAddr).availableReward() > 0){
+            uint256 reward = IERC20Staking(_erc20StakingAddr).claimReward();
+            _addReward(reward);
+            return reward;
+        }
+        return 0;
+    }
+    
+    function claimReward(address account) public returns (uint256){
+        claimStakingReward();
+        uint256 _claimable = ((pointBalanceOf(account) * pointRate()) / BONE) - balanceOf(account);
+        uint256 _diffPointBalance = pointBalanceOf(account) - ((balanceOf(account) * BONE) / pointRate());
+        _LP_balances[account] = (balanceOf(account) * BONE) / pointRate();
+        _totalSupply = _totalSupply - _claimable;
+        _totalPointSupply = _totalPointSupply - _diffPointBalance;
+        
+        bool xfer = IERC20Staking(_erc20StakingAddr).transfer(account, _claimable);
+        require(xfer, "ERR_ERC20_FALSE");
+        return _claimable;
+    }
     
     function poolRewardOf(address addr)
         public view returns (uint256){
-        uint256 totalAmount = (_h_balances[addr] * _rate) / BONE;
-        uint256 originPoolBalance = IERC20Staking(_erc20StakingAddr).balanceOf(addr);
-        if(totalAmount < originPoolBalance){
-            return 0;
-        }else{
-            uint256 poolRate = IStakeholder(addr).rate();
-            uint256 totalPoolReward = ((_h_balances[addr] * _rate) / BONE) - originPoolBalance;// ((_h_balances[account].mul(_rate)).div(_rate_decimal)).sub(originBalanceOf(account));  
-            return (totalPoolReward * poolRate) / 1e2; 
-        }
-    }
-    
-    function _addHiddenToken(address account, uint256 amount) private returns (bool){
-        uint256 _h_amount= (amount * BONE)/_rate;
-        _h_balances[account] = _h_balances[account] + _h_amount;
-        _h_totalSupply = _h_totalSupply + _h_amount;
-        return true;
-    }
-    
-    function _removeHiddenToken(address account, uint256 amount) private returns (bool){
-        uint256 _h_amount= (amount * BONE)/_rate;
-        _h_balances[account] = _h_balances[account] - _h_amount;
-        _h_totalSupply = _h_totalSupply - _h_amount;   
-        return true;
+        //uint256 totalAmount = (_h_balances[addr] * _rate) / BONE;
+        //uint256 originPoolBalance = IERC20Staking(_erc20StakingAddr).balanceOf(addr);
+        //if(totalAmount < originPoolBalance){
+        //    return 0;
+        //}else{
+        //    uint256 poolRate = IStakeholder(addr).rate();
+        //    uint256 totalPoolReward = ((_h_balances[addr] * _rate) / BONE) - originPoolBalance;// ((_h_balances[account].mul(_rate)).div(_rate_decimal)).sub(originBalanceOf(account));  
+        //    return (totalPoolReward * poolRate) / 1e2; 
+        //}
     }
 }

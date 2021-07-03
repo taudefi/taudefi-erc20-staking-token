@@ -3,6 +3,8 @@ pragma solidity ^0.8.0;
 interface IERC20Staking {
     function burn(uint256 amount) external returns (bool);
     function claimReward() external returns (uint256);
+    function availableReward() external view returns (uint256);
+    
     /**
      * @dev Returns the amount of tokens in existence.
      */
